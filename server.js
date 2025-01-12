@@ -18,12 +18,22 @@ const app = express();
 // Middleware for logging HTTP requests
 app.use(morgan("combined"));
 
-// CORS Configuration for API
+// Explicit CORS Middleware for API
 app.use(
   cors({
     origin: CORS_ORIGIN, // Allow specific origins
     methods: ["GET", "POST", "OPTIONS"],
     credentials: true, // Allow cookies and headers
+  })
+);
+
+// Explicit CORS Middleware for WebSocket Preflight
+app.options(
+  "*",
+  cors({
+    origin: CORS_ORIGIN,
+    methods: ["GET", "POST"],
+    credentials: true,
   })
 );
 
@@ -79,7 +89,7 @@ app.get("/", (req, res) => {
 });
 
 // WebSocket Setup with CORS
-const io = new Server({
+const io = new Server(httpServer, {
   cors: {
     origin: CORS_ORIGIN, // Allow WebSocket connections from specific origins
     methods: ["GET", "POST"],
