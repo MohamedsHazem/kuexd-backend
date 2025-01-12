@@ -1,6 +1,5 @@
 require("dotenv").config();
 const express = require("express");
-const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
@@ -19,11 +18,12 @@ const app = express();
 // Middleware for logging HTTP requests
 app.use(morgan("combined"));
 
-// CORS Configuration
+// CORS Configuration for API
 app.use(
   cors({
-    origin: CORS_ORIGIN,
-    methods: ["GET", "POST"],
+    origin: CORS_ORIGIN, // Allow specific origins
+    methods: ["GET", "POST", "OPTIONS"],
+    credentials: true, // Allow cookies and headers
   })
 );
 
@@ -42,9 +42,9 @@ app.use((req, res, next) => {
 // Serve Static Files
 app.use(express.static(path.join(__dirname, "public")));
 
-// Health Check Endpoint (Fixing Redirect Issue)
+// Health Check Endpoint
 app.get("/health", (req, res) => {
-  res.status(200).send("Healthy"); // Simple health response
+  res.status(200).send("Healthy");
 });
 
 // Default Route
@@ -67,16 +67,18 @@ app.get("/", (req, res) => {
   `);
 });
 
-// WebSocket Setup
-let userList = [];
+// WebSocket Setup with CORS
 const io = new Server({
   cors: {
-    origin: CORS_ORIGIN,
+    origin: CORS_ORIGIN, // Allow WebSocket connections from specific origins
     methods: ["GET", "POST"],
+    credentials: true, // Allow cookies and headers
   },
-  pingTimeout: 60000,
+  pingTimeout: 60000, // Extend ping timeout for long connections
 });
 
+// Handle WebSocket connections
+let userList = [];
 io.on("connection", (socket) => {
   console.log(`🟢 A user connected: ${socket.id}`);
 
@@ -111,16 +113,6 @@ const httpServer = http.createServer(app);
 
 // Attach WebSocket to HTTP Server
 io.attach(httpServer);
-
-// Redirect HTTP to HTTPS (excluding /health endpoint)
-httpServer.on("request", (req, res) => {
-  if (!req.secure && req.url !== "/health") {
-    const host = req.headers.host.split(":")[0];
-    const redirectUrl = `https://${host}${req.url}`;
-    res.writeHead(301, { Location: redirectUrl });
-    res.end();
-  }
-});
 
 // Start HTTP Server
 httpServer.listen(PORT, () => {
