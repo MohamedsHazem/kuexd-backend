@@ -38,7 +38,7 @@ app.use(
 
 // API Key Validation Middleware
 app.use((req, res, next) => {
-  if (req.path === "/health") return next(); // Skip validation for health checks
+  if (req.path === "/health" || req.path === "/socket.io/") return next(); // Skip validation for health checks and WebSocket
 
   const apiKey = req.headers["x-api-key"];
   if (apiKey !== process.env.API_KEY) {
@@ -53,11 +53,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // Health Check Endpoint
 app.get("/health", (req, res) => {
-  const isWebSocketAlive = io.engine.clientsCount !== undefined;
-  res.status(200).json({
-    status: "Healthy",
-    websocket: isWebSocketAlive ? "Running" : "Not Running",
-  });
+  res.status(200).send("Healthy");
 });
 
 // Default Route
