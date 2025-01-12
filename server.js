@@ -1,23 +1,16 @@
 require("dotenv").config();
 const express = require("express");
-const https = require("https");
-const fs = require("fs");
+const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const morgan = require("morgan");
 const path = require("path");
 
 const app = express();
+const server = http.createServer(app);
 
 const PORT = process.env.PORT || 3000;
-const HTTPS_PORT = process.env.HTTPS_PORT || 3443; // Define HTTPS port
 const CORS_ORIGIN = process.env.CORS_ORIGIN.split(",");
-
-// Load SSL certificate and private key
-const sslOptions = {
-  key: fs.readFileSync("./ssl/selfsigned.key"), // Replace with your private key file path
-  cert: fs.readFileSync("./ssl/selfsigned.crt"), // Replace with your certificate file path
-};
 
 // Middleware for logging HTTP requests
 app.use(morgan("combined"));
@@ -51,6 +44,10 @@ app.use(express.static(path.join(__dirname, "public")));
 /*                               Server Health Check                          */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Base URL to check if the server is running.
+ * Displays a simple HTML page with server status information.
+ */
 app.get("/", (req, res) => {
   res.status(200).send(`
     <html>
@@ -70,6 +67,10 @@ app.get("/", (req, res) => {
   `);
 });
 
+/**
+ * Health check endpoint for automated monitoring.
+ * Returns JSON with server health details.
+ */
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "Healthy",
@@ -83,16 +84,13 @@ app.get("/health", (req, res) => {
 /*                               WebSocket Setup                              */
 /* -------------------------------------------------------------------------- */
 
-const io = new Server(
-  https.createServer(sslOptions, app), // Create HTTPS server
-  {
-    cors: {
-      origin: CORS_ORIGIN,
-      methods: ["GET", "POST"],
-    },
-    pingTimeout: 60000, // Extend ping timeout for long connections
-  }
-);
+const io = new Server(server, {
+  cors: {
+    origin: CORS_ORIGIN,
+    methods: ["GET", "POST"],
+  },
+  pingTimeout: 60000, // Extend ping timeout for long connections
+});
 
 let userList = [];
 
@@ -137,18 +135,6 @@ app.use((err, req, res, next) => {
 /*                               Start the Server                             */
 /* -------------------------------------------------------------------------- */
 
-// Start HTTPS server
-https.createServer(sslOptions, app).listen(HTTPS_PORT, () => {
-  console.log(`✅ HTTPS Server is running on port ${HTTPS_PORT}`);
+server.listen(PORT, () => {
+  console.log(`✅ Server is running on port ${PORT}`);
 });
-
-// Optional: Redirect HTTP to HTTPS
-const http = require("http");
-http
-  .createServer((req, res) => {
-    res.writeHead(301, { Location: `https://${req.headers.host}${req.url}` });
-    res.end();
-  })
-  .listen(PORT, () => {
-    console.log(`🌐 HTTP Server is redirecting to HTTPS on port ${PORT}`);
-  });
