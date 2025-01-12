@@ -125,6 +125,10 @@ const httpServer = http.createServer(app);
 // Attach WebSocket to HTTP Server
 io.attach(httpServer);
 
+// Set Keep-Alive Timeout
+httpServer.keepAliveTimeout = 65000; // 65 seconds
+httpServer.headersTimeout = 66000; // Ensure headers timeout is greater than keep-alive timeout
+
 // Start HTTP Server
 httpServer.listen(PORT, () => {
   console.log(`✅ HTTP Server is running on port ${PORT}`);
