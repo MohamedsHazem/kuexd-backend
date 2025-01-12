@@ -1,16 +1,25 @@
 require("dotenv").config();
 const express = require("express");
-const http = require("http");
+const fs = require("fs");
+const https = require("https");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const morgan = require("morgan");
 const path = require("path");
+const http = require("http");
 
-const app = express();
-const server = http.createServer(app);
-
+// Centralized configuration
 const PORT = process.env.PORT || 3000;
-const CORS_ORIGIN = process.env.CORS_ORIGIN.split(",");
+const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
+const CORS_ORIGIN = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(",")
+  : ["*"];
+const SSL_KEY_PATH = process.env.SSL_KEY_PATH || "/etc/ssl/my-app/privkey.pem";
+const SSL_CERT_PATH =
+  process.env.SSL_CERT_PATH || "/etc/ssl/my-app/fullchain.pem";
+
+// Create Express app
+const app = express();
 
 // Middleware for logging HTTP requests
 app.use(morgan("combined"));
@@ -25,13 +34,11 @@ app.use(
 
 // API Key Validation Middleware
 app.use((req, res, next) => {
-  // Skip API key validation for health check endpoint
-  if (req.path === "/health") {
-    return next();
-  }
+  if (req.path === "/health") return next();
 
   const apiKey = req.headers["x-api-key"];
   if (apiKey !== process.env.API_KEY) {
+    console.error(`Unauthorized request with API Key: ${apiKey}`);
     return res.status(403).json({ error: "Unauthorized" });
   }
   next();
@@ -40,14 +47,7 @@ app.use((req, res, next) => {
 // Serve Static Files
 app.use(express.static(path.join(__dirname, "public")));
 
-/* -------------------------------------------------------------------------- */
-/*                               Server Health Check                          */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Base URL to check if the server is running.
- * Displays a simple HTML page with server status information.
- */
+// Health Check Endpoints
 app.get("/", (req, res) => {
   res.status(200).send(`
     <html>
@@ -67,10 +67,6 @@ app.get("/", (req, res) => {
   `);
 });
 
-/**
- * Health check endpoint for automated monitoring.
- * Returns JSON with server health details.
- */
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "Healthy",
@@ -80,61 +76,98 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* -------------------------------------------------------------------------- */
-/*                               WebSocket Setup                              */
-/* -------------------------------------------------------------------------- */
-
-const io = new Server(server, {
+// WebSocket Setup
+let userList = [];
+const io = new Server({
   cors: {
     origin: CORS_ORIGIN,
     methods: ["GET", "POST"],
   },
-  pingTimeout: 60000, // Extend ping timeout for long connections
+  pingTimeout: 60000,
 });
 
-let userList = [];
-
 io.on("connection", (socket) => {
-  console.log("🟢 A user connected:", socket.id);
+  console.log(`🟢 A user connected: ${socket.id}`);
 
   socket.on("user name", (userName) => {
     socket.userName = userName;
     userList[socket.id] = { id: socket.id, userName };
-    console.log(
-      `🔵 User ${userName} connected/updated with socket ID: ${socket.id}`
-    );
+    console.log(`🔵 User ${userName} connected with socket ID: ${socket.id}`);
     io.emit("users", Object.values(userList));
   });
 
   socket.on("chat message", (msg) => {
-    console.log("✉️ Message received:", msg);
+    console.log(`✉️ Message received: ${msg}`);
     socket.broadcast.emit("chat message", msg);
   });
 
   socket.on("disconnect", () => {
-    console.log(
-      `🔴 User ${socket.userName || "Unknown"} disconnected with socket ID: ${
-        socket.id
-      }`
-    );
+    console.log(`🔴 User ${socket.userName || "Unknown"} disconnected.`);
     delete userList[socket.id];
     io.emit("users", Object.values(userList));
   });
+
+  socket.on("error", (err) => {
+    console.error(
+      `❌ WebSocket error for user ${socket.userName || "Unknown"}:`,
+      err
+    );
+  });
 });
 
-/* -------------------------------------------------------------------------- */
-/*                               Global Error Handling                        */
-/* -------------------------------------------------------------------------- */
+// HTTPS Server Setup
+let httpsServer;
+try {
+  const sslOptions = {
+    key: fs.readFileSync(SSL_KEY_PATH),
+    cert: fs.readFileSync(SSL_CERT_PATH),
+  };
 
+  httpsServer = https.createServer(sslOptions, app);
+  io.attach(httpsServer);
+
+  httpsServer.listen(HTTPS_PORT, () => {
+    console.log(`✅ HTTPS Server is running on port ${HTTPS_PORT}`);
+  });
+} catch (error) {
+  console.error("❌ Error setting up HTTPS:", error.message);
+}
+
+// HTTP Server for redirection or fallback
+const httpServer = http.createServer(app);
+
+httpServer.listen(PORT, () => {
+  console.log(`✅ HTTP Server is running on port ${PORT}`);
+});
+
+httpServer.on("request", (req, res) => {
+  if (!req.secure) {
+    const host = req.headers.host.split(":")[0];
+    const redirectUrl = `https://${host}${req.url}`;
+    res.writeHead(301, { Location: redirectUrl });
+    res.end();
+  }
+});
+
+// Error Handling Middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error("❌ Unhandled Error:", err.stack);
   res.status(500).json({ error: "Something went wrong!" });
 });
 
-/* -------------------------------------------------------------------------- */
-/*                               Start the Server                             */
-/* -------------------------------------------------------------------------- */
+// Graceful Shutdown
+process.on("SIGTERM", () => {
+  console.log("🛑 SIGTERM received. Closing servers...");
+  httpsServer?.close(() => console.log("HTTPS Server closed."));
+  httpServer.close(() => console.log("HTTP Server closed."));
+  process.exit(0);
+});
 
-server.listen(PORT, () => {
-  console.log(`✅ Server is running on port ${PORT}`);
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ Unhandled Promise Rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err.stack);
+  process.exit(1); // Exit to restart via process manager
 });
