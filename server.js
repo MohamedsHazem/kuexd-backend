@@ -48,6 +48,7 @@ app.use((req, res, next) => {
   }
   next();
 });
+
 console.log("CORS_ORIGIN (parsed):", CORS_ORIGIN);
 
 // Serve Static Files
@@ -77,6 +78,9 @@ app.get("/", (req, res) => {
     </html>
   `);
 });
+
+// HTTP Server for Application
+const httpServer = http.createServer(app);
 
 // WebSocket Setup with CORS
 const io = new Server(httpServer, {
@@ -118,12 +122,6 @@ io.on("connection", (socket) => {
     );
   });
 });
-
-// HTTP Server for Application
-const httpServer = http.createServer(app);
-
-// Attach WebSocket to HTTP Server
-io.attach(httpServer);
 
 // Set Keep-Alive Timeout
 httpServer.keepAliveTimeout = 65000; // 65 seconds
