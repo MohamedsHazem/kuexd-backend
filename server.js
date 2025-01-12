@@ -38,8 +38,13 @@ app.use(
 
 // API Key Validation Middleware
 app.use((req, res, next) => {
-  if (req.path === "/health" || req.path === "/socket.io/") return next(); // Skip validation for health checks and WebSocket
-
+  if (
+    req.path === "/health" ||
+    req.path === "/socket.io/" ||
+    req.method === "OPTIONS"
+  ) {
+    return next();
+  }
   const apiKey = req.headers["x-api-key"];
   if (apiKey !== process.env.API_KEY) {
     console.error(`Unauthorized request with API Key: ${apiKey}`);
