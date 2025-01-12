@@ -63,7 +63,6 @@ io.on("connection", (socket) => {
   });
 
   socket.on("chat message", (msg) => {
-    if (typeof msg !== "string") return;
     socket.broadcast.emit("chat message", msg);
   });
 
