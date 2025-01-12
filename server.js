@@ -37,17 +37,6 @@ app.options(
   })
 );
 
-// Force HTTPS Middleware
-app.use((req, res, next) => {
-  if (
-    req.headers["x-forwarded-proto"] !== "https" &&
-    process.env.NODE_ENV === "production"
-  ) {
-    return res.redirect(`https://${req.headers.host}${req.url}`);
-  }
-  next();
-});
-
 // API Key Validation Middleware
 app.use((req, res, next) => {
   if (req.path === "/health") return next(); // Skip validation for health checks
@@ -59,6 +48,7 @@ app.use((req, res, next) => {
   }
   next();
 });
+console.log("CORS_ORIGIN (parsed):", CORS_ORIGIN);
 
 // Serve Static Files
 app.use(express.static(path.join(__dirname, "public")));
@@ -91,11 +81,11 @@ app.get("/", (req, res) => {
 // WebSocket Setup with CORS
 const io = new Server(httpServer, {
   cors: {
-    origin: CORS_ORIGIN, // Allow WebSocket connections from specific origins
+    origin: CORS_ORIGIN,
     methods: ["GET", "POST"],
-    credentials: true, // Allow cookies and headers
+    credentials: true,
   },
-  pingTimeout: 60000, // Extend ping timeout for long connections
+  pingTimeout: 60000,
 });
 
 // Handle WebSocket connections
