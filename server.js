@@ -1,22 +1,17 @@
 require("dotenv").config();
 const express = require("express");
 const fs = require("fs");
-const https = require("https");
+const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const morgan = require("morgan");
 const path = require("path");
-const http = require("http");
 
 // Centralized configuration
 const PORT = process.env.PORT || 3000;
-const HTTPS_PORT = process.env.HTTPS_PORT || 3443;
 const CORS_ORIGIN = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",")
   : ["*"];
-const SSL_KEY_PATH = process.env.SSL_KEY_PATH || "/etc/ssl/my-app/privkey.pem";
-const SSL_CERT_PATH =
-  process.env.SSL_CERT_PATH || "/etc/ssl/my-app/fullchain.pem";
 
 // Create Express app
 const app = express();
@@ -34,7 +29,7 @@ app.use(
 
 // API Key Validation Middleware
 app.use((req, res, next) => {
-  if (req.path === "/health") return next();
+  if (req.path === "/health") return next(); // Skip validation for health checks
 
   const apiKey = req.headers["x-api-key"];
   if (apiKey !== process.env.API_KEY) {
@@ -47,7 +42,12 @@ app.use((req, res, next) => {
 // Serve Static Files
 app.use(express.static(path.join(__dirname, "public")));
 
-// Health Check Endpoints
+// Health Check Endpoint (Fixing Redirect Issue)
+app.get("/health", (req, res) => {
+  res.status(200).send("Healthy"); // Simple health response
+});
+
+// Default Route
 app.get("/", (req, res) => {
   res.status(200).send(`
     <html>
@@ -65,15 +65,6 @@ app.get("/", (req, res) => {
       </body>
     </html>
   `);
-});
-
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "Healthy",
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    version: "1.0.0",
-  });
 });
 
 // WebSocket Setup
@@ -115,38 +106,25 @@ io.on("connection", (socket) => {
   });
 });
 
-// HTTPS Server Setup
-let httpsServer;
-try {
-  const sslOptions = {
-    key: fs.readFileSync(SSL_KEY_PATH),
-    cert: fs.readFileSync(SSL_CERT_PATH),
-  };
-
-  httpsServer = https.createServer(sslOptions, app);
-  io.attach(httpsServer);
-
-  httpsServer.listen(HTTPS_PORT, () => {
-    console.log(`✅ HTTPS Server is running on port ${HTTPS_PORT}`);
-  });
-} catch (error) {
-  console.error("❌ Error setting up HTTPS:", error.message);
-}
-
-// HTTP Server for redirection or fallback
+// HTTP Server for Application
 const httpServer = http.createServer(app);
 
-httpServer.listen(PORT, () => {
-  console.log(`✅ HTTP Server is running on port ${PORT}`);
-});
+// Attach WebSocket to HTTP Server
+io.attach(httpServer);
 
+// Redirect HTTP to HTTPS (excluding /health endpoint)
 httpServer.on("request", (req, res) => {
-  if (!req.secure) {
+  if (!req.secure && req.url !== "/health") {
     const host = req.headers.host.split(":")[0];
     const redirectUrl = `https://${host}${req.url}`;
     res.writeHead(301, { Location: redirectUrl });
     res.end();
   }
+});
+
+// Start HTTP Server
+httpServer.listen(PORT, () => {
+  console.log(`✅ HTTP Server is running on port ${PORT}`);
 });
 
 // Error Handling Middleware
@@ -157,8 +135,7 @@ app.use((err, req, res, next) => {
 
 // Graceful Shutdown
 process.on("SIGTERM", () => {
-  console.log("🛑 SIGTERM received. Closing servers...");
-  httpsServer?.close(() => console.log("HTTPS Server closed."));
+  console.log("🛑 SIGTERM received. Closing server...");
   httpServer.close(() => console.log("HTTP Server closed."));
   process.exit(0);
 });
