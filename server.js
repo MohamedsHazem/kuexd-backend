@@ -12,6 +12,15 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",")
   : ["*"];
 
+// Debugging: Log CORS_ORIGIN and verify .env is loaded
+console.log("CORS_ORIGIN (parsed):", CORS_ORIGIN);
+console.log(
+  "Environment variables loaded:",
+  process.env.NODE_ENV,
+  process.env.PORT,
+  process.env.API_KEY
+);
+
 // Create Express app
 const app = express();
 
@@ -22,18 +31,8 @@ app.use(morgan("combined"));
 app.use(
   cors({
     origin: CORS_ORIGIN, // Allow specific origins
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "OPTIONS"], // Allow all necessary methods
     credentials: true, // Allow cookies and headers
-  })
-);
-
-// Explicit CORS Middleware for WebSocket Preflight
-app.options(
-  "*",
-  cors({
-    origin: CORS_ORIGIN,
-    methods: ["GET", "POST"],
-    credentials: true,
   })
 );
 
@@ -49,14 +48,16 @@ app.use((req, res, next) => {
   next();
 });
 
-console.log("CORS_ORIGIN (parsed):", CORS_ORIGIN);
-
 // Serve Static Files
 app.use(express.static(path.join(__dirname, "public")));
 
 // Health Check Endpoint
 app.get("/health", (req, res) => {
-  res.status(200).send("Healthy");
+  const isWebSocketAlive = io.engine.clientsCount !== undefined;
+  res.status(200).json({
+    status: "Healthy",
+    websocket: isWebSocketAlive ? "Running" : "Not Running",
+  });
 });
 
 // Default Route
@@ -85,11 +86,10 @@ const httpServer = http.createServer(app);
 // WebSocket Setup with CORS
 const io = new Server(httpServer, {
   cors: {
-    origin: CORS_ORIGIN,
-    methods: ["GET", "POST"],
-    credentials: true,
+    origin: CORS_ORIGIN, // Allow specific origins
+    credentials: true, // Allow credentials (if needed)
   },
-  pingTimeout: 60000,
+  pingTimeout: 60000, // Increase ping timeout
 });
 
 // Handle WebSocket connections
@@ -98,6 +98,10 @@ io.on("connection", (socket) => {
   console.log(`🟢 A user connected: ${socket.id}`);
 
   socket.on("user name", (userName) => {
+    if (!userName || typeof userName !== "string") {
+      console.error(`Invalid user name: ${userName}`);
+      return;
+    }
     socket.userName = userName;
     userList[socket.id] = { id: socket.id, userName };
     console.log(`🔵 User ${userName} connected with socket ID: ${socket.id}`);
@@ -105,6 +109,10 @@ io.on("connection", (socket) => {
   });
 
   socket.on("chat message", (msg) => {
+    if (!msg || typeof msg !== "string") {
+      console.error(`Invalid message: ${msg}`);
+      return;
+    }
     console.log(`✉️ Message received: ${msg}`);
     socket.broadcast.emit("chat message", msg);
   });
@@ -134,7 +142,13 @@ httpServer.listen(PORT, () => {
 
 // Error Handling Middleware
 app.use((err, req, res, next) => {
-  console.error("❌ Unhandled Error:", err.stack);
+  console.error("❌ Unhandled Error:", {
+    message: err.message,
+    stack: err.stack,
+    method: req.method,
+    url: req.url,
+    headers: req.headers,
+  });
   res.status(500).json({ error: "Something went wrong!" });
 });
 
