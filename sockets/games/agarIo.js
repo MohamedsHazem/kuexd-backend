@@ -1,16 +1,25 @@
 /************************************
- * sockets/games/agarIo.js
+ * sockets/games/agarIo.mjs
  ************************************/
 
 /** Dimensions of the world */
-const WORLD_WIDTH = 900;
-const WORLD_HEIGHT = 900;
+const WORLD_WIDTH = 1080;
+const WORLD_HEIGHT = 1080;
 
 /** Server update rate in milliseconds */
-const TICK_RATE = 30; // ~30 FPS updates
+const TICK_RATE = 60; // ~60 FPS updates
 
 /** Import necessary utilities */
 const { broadcastRooms } = require("../../utils/gameUtils");
+
+// Initialize RBush variable
+let RBush;
+
+// Load RBush dynamically
+(async () => {
+  const rbushModule = await import("rbush");
+  RBush = rbushModule.default;
+})();
 
 /**
  * Start the Agar.io-like room.
@@ -20,12 +29,21 @@ const { broadcastRooms } = require("../../utils/gameUtils");
  * @param {Object} room - The room object to start.
  * @param {Object} games - The master games object.
  */
-function startAgarIoRoom(game, room, games) {
+async function startAgarIoRoom(game, room, games) {
+  // Wait for RBush to be loaded if not already loaded
+  if (!RBush) {
+    const rbushModule = await import("rbush");
+    RBush = rbushModule.default;
+  }
+
   console.log(
     `[Server] startAgarIoRoom (Agar.io) -> Setting initial positions for roomId=${room.id}`
   );
 
-  // Spawn each player randomly with a default mass=10
+  // Initialize players as a Map for O(1) access
+  room.playersMap = new Map();
+  room.alivePlayers = new Set();
+
   room.players.forEach((player) => {
     player.x = Math.floor(Math.random() * WORLD_WIDTH);
     player.y = Math.floor(Math.random() * WORLD_HEIGHT);
@@ -35,14 +53,31 @@ function startAgarIoRoom(game, room, games) {
     // so we know which direction to fire bullets.
     player.lastDx = 0;
     player.lastDy = 0;
+    // Add to playersMap and alivePlayers
+    room.playersMap.set(player.socketId, player);
+    room.alivePlayers.add(player.socketId);
   });
 
   // No food in this variant — so we skip food initialization
 
-  // Initialize bullets array
+  // Initialize bullets array and object pool
   room.bullets = [];
-  // A simple incremental ID for each bullet
   room.bulletIdCounter = 1;
+  room.bulletPool = []; // Object pool for bullets
+
+  // Initialize spatial index for players
+  room.playerSpatialIndex = new RBush();
+
+  // Populate spatial index with initial player positions
+  room.playersMap.forEach((player) => {
+    room.playerSpatialIndex.insert({
+      minX: player.x - player.mass,
+      minY: player.y - player.mass,
+      maxX: player.x + player.mass,
+      maxY: player.y + player.mass,
+      player, // Reference to the player object
+    });
+  });
 
   // Clear any existing intervals before starting a new one
   if (room.bulletInterval) {
@@ -72,26 +107,34 @@ function startAgarIoRoom(game, room, games) {
  */
 function broadcastGameState(io, gameId, roomId, room) {
   const channel = `${gameId}-${roomId}`;
+  if (!io) return;
+
   // We only broadcast players who are not "dead."
-  // But you can also send them all if you prefer, marking dead players differently.
-  const alivePlayers = room.players.filter((p) => !p.isDead);
+  const alivePlayers = Array.from(room.alivePlayers).map((socketId) =>
+    room.playersMap.get(socketId)
+  );
+
+  // Optimize by sending only necessary player and bullet data
+  const playersData = alivePlayers.map((p) => ({
+    socketId: p.socketId,
+    userName: p.userName,
+    x: p.x,
+    y: p.y,
+    mass: p.mass,
+  }));
+
+  const bulletsData = room.bullets.map((b) => ({
+    id: b.id,
+    ownerId: b.ownerId,
+    x: b.x,
+    y: b.y,
+    radius: b.radius,
+  }));
 
   io.to(channel).emit("gameStateUpdate", {
     roomId,
-    players: alivePlayers.map((p) => ({
-      socketId: p.socketId,
-      userName: p.userName,
-      x: p.x,
-      y: p.y,
-      mass: p.mass,
-    })),
-    bullets: room.bullets.map((b) => ({
-      id: b.id,
-      ownerId: b.ownerId,
-      x: b.x,
-      y: b.y,
-      radius: b.radius,
-    })),
+    players: playersData,
+    bullets: bulletsData,
     winner: room.winner || null,
     worldSize: { width: WORLD_WIDTH, height: WORLD_HEIGHT },
   });
@@ -113,7 +156,7 @@ function handlePlayerMove(io, games, data) {
   let room = game.activeRooms[roomId] || game.rooms[roomId];
   if (!room) return;
 
-  const player = room.players.find((p) => p.socketId === socket.id);
+  const player = room.playersMap.get(socket.id);
   if (!player || player.isDead) return;
 
   const step = 4; // movement speed
@@ -159,11 +202,35 @@ function handlePlayerMove(io, games, data) {
   }
 
   // Update player's position with clamp to keep within world bounds
+  const oldX = player.x;
+  const oldY = player.y;
   player.x = clamp(player.x + dx, 0, WORLD_WIDTH);
   player.y = clamp(player.y + dy, 0, WORLD_HEIGHT);
 
-  // Track last direction (for bullet firing)
+  // Update spatial index if player's position has changed
   if (dx !== 0 || dy !== 0) {
+    // Remove old position
+    room.playerSpatialIndex.remove(
+      {
+        minX: oldX - player.mass,
+        minY: oldY - player.mass,
+        maxX: oldX + player.mass,
+        maxY: oldY + player.mass,
+        player,
+      },
+      (a, b) => a.player.socketId === b.player.socketId
+    );
+
+    // Insert new position
+    room.playerSpatialIndex.insert({
+      minX: player.x - player.mass,
+      minY: player.y - player.mass,
+      maxX: player.x + player.mass,
+      maxY: player.y + player.mass,
+      player,
+    });
+
+    // Track last direction (for bullet firing)
     player.lastDx = dx;
     player.lastDy = dy;
   }
@@ -188,7 +255,7 @@ function handleShootBullet(io, games, data) {
   let room = game.activeRooms[roomId] || game.rooms[roomId];
   if (!room) return;
 
-  const player = room.players.find((p) => p.socketId === socket.id);
+  const player = room.playersMap.get(socket.id);
   if (!player || player.isDead) return;
 
   // Basic validation
@@ -196,32 +263,26 @@ function handleShootBullet(io, games, data) {
     !direction ||
     typeof direction.x !== "number" ||
     typeof direction.y !== "number" ||
-    !["small", "charged", "fullyCharged"].includes(bulletType)
+    !["charged", "fullyCharged"].includes(bulletType) // we can add small bullet later ( no charge)
   ) {
     return; // Invalid data
   }
 
-  // Determine bullet properties based on bulletType
-  let speedValue = 10;
-  let radius = 5;
-  let rangeLimit = 200; // small bullet has short range
-
   switch (bulletType) {
     case "fullyCharged":
-      speedValue = 26; // Customize as needed
-      radius = 16; // Larger radius
+      speedValue = 30; // Customize as needed
+      radius = 25; // Larger radius
       rangeLimit = Infinity; // Or set a very high limit
       break;
     case "charged":
-      speedValue = 16;
-      radius = 8;
+      speedValue = 30;
+      radius = 5;
       rangeLimit = Infinity;
       break;
     case "small":
     default:
-      speedValue = 10;
-      radius = 5;
-      rangeLimit = 200;
+      return;
+      //leave it empty not needed
       break;
   }
 
@@ -238,19 +299,34 @@ function handleShootBullet(io, games, data) {
   const vx = normalizedDx * speedValue;
   const vy = normalizedDy * speedValue;
 
-  // Create bullet
-  const bullet = {
-    id: room.bulletIdCounter++,
-    ownerId: player.socketId,
-    x: player.x,
-    y: player.y,
-    vx,
-    vy,
-    radius,
-    traveled: 0,
-    rangeLimit,
-    type: bulletType, // Add type for client-side rendering
-  };
+  // Object Pooling: Reuse bullets from the pool if available
+  let bullet;
+  if (room.bulletPool.length > 0) {
+    bullet = room.bulletPool.pop();
+    bullet.id = room.bulletIdCounter++;
+    bullet.ownerId = player.socketId;
+    bullet.x = player.x;
+    bullet.y = player.y;
+    bullet.vx = vx;
+    bullet.vy = vy;
+    bullet.radius = radius;
+    bullet.traveled = 0;
+    bullet.rangeLimit = rangeLimit;
+    bullet.type = bulletType;
+  } else {
+    bullet = {
+      id: room.bulletIdCounter++,
+      ownerId: player.socketId,
+      x: player.x,
+      y: player.y,
+      vx,
+      vy,
+      radius,
+      traveled: 0,
+      rangeLimit,
+      type: bulletType, // Add type for client-side rendering
+    };
+  }
 
   room.bullets.push(bullet);
 
@@ -275,22 +351,46 @@ function endAgarIoRoom(game, room, games) {
     console.log(`[Server] Cleared bulletInterval for roomId=${room.id}`);
   }
 
-  // 2. Remove all bullets
+  // 2. Remove all bullets and recycle them
   if (room.bullets) {
+    room.bullets.forEach((bullet) => {
+      room.bulletPool.push(bullet);
+    });
     room.bullets = [];
     console.log(`[Server] Removed all bullets for roomId=${room.id}`);
   }
 
-  // 3. Reset player states
-  if (room.players) {
-    room.players.forEach((player) => {
+  // 3. Reset player states and update spatial index
+  if (room.playersMap) {
+    room.playersMap.forEach((player) => {
       player.isDead = false;
       player.mass = 10; // Reset to default mass or as needed
       player.x = Math.floor(Math.random() * WORLD_WIDTH);
       player.y = Math.floor(Math.random() * WORLD_HEIGHT);
       player.lastDx = 0;
       player.lastDy = 0;
+
+      // Update spatial index
+      room.playerSpatialIndex.remove(
+        {
+          minX: player.x - player.mass,
+          minY: player.y - player.mass,
+          maxX: player.x + player.mass,
+          maxY: player.y + player.mass,
+          player,
+        },
+        (a, b) => a.player.socketId === b.player.socketId
+      );
+
+      room.playerSpatialIndex.insert({
+        minX: player.x - player.mass,
+        minY: player.y - player.mass,
+        maxX: player.x + player.mass,
+        maxY: player.y + player.mass,
+        player,
+      });
     });
+    room.alivePlayers = new Set(room.playersMap.keys());
     console.log(`[Server] Reset player states for roomId=${room.id}`);
   }
 
@@ -322,11 +422,13 @@ function endAgarIoRoom(game, room, games) {
  */
 function updateBullets(game, room, games) {
   if (!room.bullets) return;
-  if (!room.players) return;
+  if (!room.playersMap) return;
 
-  const alivePlayers = room.players.filter((p) => !p.isDead);
+  const alivePlayers = Array.from(room.alivePlayers).map((socketId) =>
+    room.playersMap.get(socketId)
+  );
 
-  // Update bullet positions
+  // Iterate over bullets in reverse to safely remove items
   for (let i = room.bullets.length - 1; i >= 0; i--) {
     const b = room.bullets[i];
 
@@ -334,9 +436,9 @@ function updateBullets(game, room, games) {
     b.x += b.vx;
     b.y += b.vy;
 
-    // Increase traveled distance
-    const distTraveled = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
-    b.traveled += distTraveled;
+    // Increase traveled distance (use squared distance to optimize)
+    const distTraveled = b.vx * b.vx + b.vy * b.vy; // Squared distance
+    b.traveled += Math.sqrt(distTraveled); // Still need sqrt to add to traveled
 
     // Check out-of-bounds or range limit
     if (
@@ -346,34 +448,71 @@ function updateBullets(game, room, games) {
       b.y > WORLD_HEIGHT ||
       (b.rangeLimit !== Infinity && b.traveled >= b.rangeLimit)
     ) {
-      // Remove this bullet
+      // Remove this bullet and recycle it
+      room.bulletPool.push(b);
       room.bullets.splice(i, 1);
       continue;
     }
 
-    // Check collision with players
-    for (let j = 0; j < alivePlayers.length; j++) {
-      const player = alivePlayers[j];
-      if (player.socketId === b.ownerId) continue; // don't hit the owner
+    // Spatial Query: Find potential players in bullet's vicinity
+    const potentialPlayers = room.playerSpatialIndex.search({
+      minX: b.x - b.radius,
+      minY: b.y - b.radius,
+      maxX: b.x + b.radius,
+      maxY: b.y + b.radius,
+    });
 
-      const dist = distance(b.x, b.y, player.x, player.y);
-      const collisionDist = b.radius + player.mass; // or tweak collision logic
-      if (dist < collisionDist) {
+    let collisionDetected = false;
+
+    for (let j = 0; j < potentialPlayers.length; j++) {
+      const player = potentialPlayers[j].player;
+      if (player.socketId === b.ownerId || player.isDead) continue; // don't hit the owner or dead players
+
+      const dx = b.x - player.x;
+      const dy = b.y - player.y;
+      const distSq = dx * dx + dy * dy;
+      const collisionDist = b.radius + player.mass;
+      const collisionDistSq = collisionDist * collisionDist;
+
+      if (distSq < collisionDistSq) {
         // Kill the player
         player.isDead = true;
+        room.alivePlayers.delete(player.socketId);
         console.log(
           `[Server] Player ${player.userName} has been killed by bullet ${b.id}`
         );
 
-        // Remove the bullet on impact
+        // Remove the bullet on impact and recycle it
+        room.bulletPool.push(b);
         room.bullets.splice(i, 1);
-        break;
+
+        // Remove player from spatial index
+        room.playerSpatialIndex.remove(
+          {
+            minX: player.x - player.mass,
+            minY: player.y - player.mass,
+            maxX: player.x + player.mass,
+            maxY: player.y + player.mass,
+            player,
+          },
+          (a, b) => a.player.socketId === b.player.socketId
+        );
+
+        collisionDetected = true;
+        break; // Exit the loop after collision
       }
+    }
+
+    if (collisionDetected) {
+      continue; // Move to the next bullet
     }
   }
 
   // Check if there's only one (or zero) players left alive => declare winner
-  const stillAlive = room.players.filter((p) => !p.isDead);
+  const stillAlive = Array.from(room.alivePlayers).map((socketId) =>
+    room.playersMap.get(socketId)
+  );
+
   if (stillAlive.length === 1 && !room.winner) {
     // We have a winner
     room.winner = stillAlive[0].userName;
@@ -402,11 +541,11 @@ function updateBullets(game, room, games) {
   }
 }
 
-/** Utility function: distance formula. */
-function distance(x1, y1, x2, y2) {
+/** Utility function: distance formula using squared distances. */
+function distanceSquared(x1, y1, x2, y2) {
   const dx = x1 - x2;
   const dy = y1 - y2;
-  return Math.sqrt(dx * dx + dy * dy);
+  return dx * dx + dy * dy;
 }
 
 /** Utility function: clamp a value between min & max. */
@@ -414,10 +553,14 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+// Export using CommonJS
 module.exports = {
   startAgarIoRoom,
   broadcastGameState,
   handlePlayerMove,
   handleShootBullet,
   endAgarIoRoom, // Exported for use in other modules if needed
+  WORLD_WIDTH,
+  WORLD_HEIGHT,
+  TICK_RATE,
 };

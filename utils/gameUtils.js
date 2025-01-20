@@ -13,6 +13,9 @@ function generateRoomId() {
  *  { rooms: {}, activeRooms: {} }
  */
 function getGame(gameId, games) {
+  if (!games) {
+    return null;
+  }
   if (!games[gameId]) {
     games[gameId] = { rooms: {}, activeRooms: {} };
   }
@@ -69,6 +72,9 @@ function updateRoomCountForEveryone(gameId, games, io) {
  */
 function broadcastRooms(gameId, games, io) {
   const game = getGame(gameId, games);
+  if (!game) {
+    return;
+  }
   const roomsArray = Object.values(game.rooms);
   updateRoomCountForEveryone(gameId, games, io);
   io.to(gameId).emit("roomsList", roomsArray);
