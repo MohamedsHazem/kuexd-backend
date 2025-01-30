@@ -23,7 +23,6 @@ let RBush;
 
 /**
  * Start the Agar.io-like room.
- * We remove the old food logic and add bullets.
  *
  * @param {Object} game - The game object.
  * @param {Object} room - The room object to start.
@@ -49,8 +48,7 @@ async function startAgarIoRoom(game, room, games) {
     player.y = Math.floor(Math.random() * WORLD_HEIGHT);
     player.mass = 10;
     player.isDead = false;
-    // Track the player's last movement direction (dx/dy)
-    // so we know which direction to fire bullets.
+    // Track last known direction for bullet firing
     player.lastDx = 0;
     player.lastDy = 0;
     // Add to playersMap and alivePlayers
@@ -58,7 +56,7 @@ async function startAgarIoRoom(game, room, games) {
     room.alivePlayers.add(player.socketId);
   });
 
-  // No food in this variant — so we skip food initialization
+  // No food in this variant
 
   // Initialize bullets array and object pool
   room.bullets = [];
@@ -99,22 +97,18 @@ async function startAgarIoRoom(game, room, games) {
 
 /**
  * Broadcast the entire Agar.io room state (players + bullets).
- *
- * @param {Object} io - The Socket.io server instance.
- * @param {Number} gameId - The ID of the game.
- * @param {Number} roomId - The ID of the room.
- * @param {Object} room - The room object containing game state.
  */
 function broadcastGameState(io, gameId, roomId, room) {
-  const channel = `${gameId}-${roomId}`;
   if (!io) return;
 
-  // We only broadcast players who are not "dead."
+  const channel = `${gameId}-${roomId}`;
+
+  // Only broadcast players who are alive
   const alivePlayers = Array.from(room.alivePlayers).map((socketId) =>
     room.playersMap.get(socketId)
   );
 
-  // Optimize by sending only necessary player and bullet data
+  // Minimize data
   const playersData = alivePlayers.map((p) => ({
     socketId: p.socketId,
     userName: p.userName,
@@ -142,11 +136,6 @@ function broadcastGameState(io, gameId, roomId, room) {
 
 /**
  * Handle player movement from the client.
- * We store the last direction to know where to shoot bullets.
- *
- * @param {Object} io - The Socket.io server instance.
- * @param {Object} games - The master games object.
- * @param {Object} data - The data object containing movement information.
  */
 function handlePlayerMove(io, games, data) {
   const { gameId, roomId, socket, direction } = data;
@@ -156,7 +145,7 @@ function handlePlayerMove(io, games, data) {
   let room = game.activeRooms[roomId] || game.rooms[roomId];
   if (!room) return;
 
-  const player = room.playersMap.get(socket.id);
+  const player = room.playersMap?.get(socket.id);
   if (!player || player.isDead) return;
 
   const step = 4; // movement speed
@@ -181,35 +170,30 @@ function handlePlayerMove(io, games, data) {
       dy = step;
       break;
     case "up":
-      dx = 0;
       dy = -step;
       break;
     case "down":
-      dx = 0;
       dy = step;
       break;
     case "left":
       dx = -step;
-      dy = 0;
       break;
     case "right":
       dx = step;
-      dy = 0;
       break;
     default:
       dx = 0;
       dy = 0;
   }
 
-  // Update player's position with clamp to keep within world bounds
+  // Clamp to world boundaries
   const oldX = player.x;
   const oldY = player.y;
   player.x = clamp(player.x + dx, 0, WORLD_WIDTH);
   player.y = clamp(player.y + dy, 0, WORLD_HEIGHT);
 
-  // Update spatial index if player's position has changed
+  // Update spatial index if position changed
   if (dx !== 0 || dy !== 0) {
-    // Remove old position
     room.playerSpatialIndex.remove(
       {
         minX: oldX - player.mass,
@@ -221,7 +205,6 @@ function handlePlayerMove(io, games, data) {
       (a, b) => a.player.socketId === b.player.socketId
     );
 
-    // Insert new position
     room.playerSpatialIndex.insert({
       minX: player.x - player.mass,
       minY: player.y - player.mass,
@@ -230,22 +213,16 @@ function handlePlayerMove(io, games, data) {
       player,
     });
 
-    // Track last direction (for bullet firing)
+    // Store last direction for bullet logic
     player.lastDx = dx;
     player.lastDy = dy;
   }
 
-  // Then broadcast new state
   broadcastGameState(io, gameId, roomId, room);
 }
 
 /**
- * Handle the event when a client shoots a bullet.
- * bulletType can be 'small', 'charged', or 'fullyCharged'.
- *
- * @param {Object} io - The Socket.io server instance.
- * @param {Object} games - The master games object.
- * @param {Object} data - The data object containing bullet information.
+ * Handle shooting bullets.
  */
 function handleShootBullet(io, games, data) {
   const { gameId, roomId, socket, bulletType, direction, speed } = data;
@@ -255,7 +232,7 @@ function handleShootBullet(io, games, data) {
   let room = game.activeRooms[roomId] || game.rooms[roomId];
   if (!room) return;
 
-  const player = room.playersMap.get(socket.id);
+  const player = room.playersMap?.get(socket.id);
   if (!player || player.isDead) return;
 
   // Basic validation
@@ -263,43 +240,35 @@ function handleShootBullet(io, games, data) {
     !direction ||
     typeof direction.x !== "number" ||
     typeof direction.y !== "number" ||
-    !["charged", "fullyCharged"].includes(bulletType) // we can add small bullet later ( no charge)
+    !["charged", "fullyCharged"].includes(bulletType)
   ) {
     return; // Invalid data
   }
 
+  let speedValue, radius, rangeLimit;
   switch (bulletType) {
     case "fullyCharged":
-      speedValue = 30; // Customize as needed
-      radius = 25; // Larger radius
-      rangeLimit = Infinity; // Or set a very high limit
+      speedValue = 30;
+      radius = 25;
+      rangeLimit = Infinity;
       break;
     case "charged":
       speedValue = 30;
       radius = 5;
       rangeLimit = Infinity;
       break;
-    case "small":
     default:
+      // "small" or unknown bullet type, ignoring for this example
       return;
-      //leave it empty not needed
-      break;
   }
 
-  // Use the direction sent by the client
-  let dx = direction.x;
-  let dy = direction.y;
-
   // Ensure the direction is normalized
-  const length = Math.sqrt(dx * dx + dy * dy) || 1;
-  const normalizedDx = dx / length;
-  const normalizedDy = dy / length;
+  const length =
+    Math.sqrt(direction.x * direction.x + direction.y * direction.y) || 1;
+  const vx = (direction.x / length) * speedValue;
+  const vy = (direction.y / length) * speedValue;
 
-  // Apply speed
-  const vx = normalizedDx * speedValue;
-  const vy = normalizedDy * speedValue;
-
-  // Object Pooling: Reuse bullets from the pool if available
+  // Object Pool
   let bullet;
   if (room.bulletPool.length > 0) {
     bullet = room.bulletPool.pop();
@@ -324,7 +293,7 @@ function handleShootBullet(io, games, data) {
       radius,
       traveled: 0,
       rangeLimit,
-      type: bulletType, // Add type for client-side rendering
+      type: bulletType,
     };
   }
 
@@ -336,10 +305,6 @@ function handleShootBullet(io, games, data) {
 
 /**
  * Ends the Agar.io room by performing cleanup.
- *
- * @param {Object} game - The game object.
- * @param {Object} room - The room object to clean up.
- * @param {Object} games - The master games object.
  */
 function endAgarIoRoom(game, room, games) {
   console.log(`[Server] Ending Agar.io room: ${room.id}`);
@@ -364,13 +329,13 @@ function endAgarIoRoom(game, room, games) {
   if (room.playersMap) {
     room.playersMap.forEach((player) => {
       player.isDead = false;
-      player.mass = 10; // Reset to default mass or as needed
+      player.mass = 10;
       player.x = Math.floor(Math.random() * WORLD_WIDTH);
       player.y = Math.floor(Math.random() * WORLD_HEIGHT);
       player.lastDx = 0;
       player.lastDy = 0;
 
-      // Update spatial index
+      // Remove old positions & re-insert if needed
       room.playerSpatialIndex.remove(
         {
           minX: player.x - player.mass,
@@ -405,27 +370,21 @@ function endAgarIoRoom(game, room, games) {
     .to(`${game.id}-${room.id}`)
     .emit("gameEnded", { roomId: room.id, winner: room.winner });
 
-  // 6. Broadcast the updated room list to all clients
+  // 6. Broadcast the updated room list
   if (typeof broadcastRooms === "function") {
     broadcastRooms(game.id, games, game.io);
   }
 }
 
 /**
- * Periodically called to update all bullets (position, collisions).
- * If a bullet collides with a player (not owner), that player is "killed."
- * Also checks if bullet has traveled beyond range or out of bounds.
- *
- * @param {Object} game - The game object.
- * @param {Object} room - The room object containing game state.
- * @param {Object} games - The master games object.
+ * Periodically called to update all bullets (position, collisions, etc).
  */
 function updateBullets(game, room, games) {
-  if (!room.bullets) return;
-  if (!room.playersMap) return;
+  if (!room.bullets || !room.playersMap) return;
 
-  const alivePlayers = Array.from(room.alivePlayers).map((socketId) =>
-    room.playersMap.get(socketId)
+  // For convenience
+  const alivePlayers = Array.from(room.alivePlayers).map((id) =>
+    room.playersMap.get(id)
   );
 
   // Iterate over bullets in reverse to safely remove items
@@ -436,11 +395,11 @@ function updateBullets(game, room, games) {
     b.x += b.vx;
     b.y += b.vy;
 
-    // Increase traveled distance (use squared distance to optimize)
-    const distTraveled = b.vx * b.vx + b.vy * b.vy; // Squared distance
-    b.traveled += Math.sqrt(distTraveled); // Still need sqrt to add to traveled
+    // Increase traveled distance (use sqrt to add to traveled)
+    const distTraveledSq = b.vx * b.vx + b.vy * b.vy;
+    b.traveled += Math.sqrt(distTraveledSq);
 
-    // Check out-of-bounds or range limit
+    // Out-of-bounds or range limit
     if (
       b.x < 0 ||
       b.x > WORLD_WIDTH ||
@@ -448,13 +407,13 @@ function updateBullets(game, room, games) {
       b.y > WORLD_HEIGHT ||
       (b.rangeLimit !== Infinity && b.traveled >= b.rangeLimit)
     ) {
-      // Remove this bullet and recycle it
+      // Recycle bullet
       room.bulletPool.push(b);
       room.bullets.splice(i, 1);
       continue;
     }
 
-    // Spatial Query: Find potential players in bullet's vicinity
+    // Spatial query: potential collisions
     const potentialPlayers = room.playerSpatialIndex.search({
       minX: b.x - b.radius,
       minY: b.y - b.radius,
@@ -464,9 +423,10 @@ function updateBullets(game, room, games) {
 
     let collisionDetected = false;
 
-    for (let j = 0; j < potentialPlayers.length; j++) {
-      const player = potentialPlayers[j].player;
-      if (player.socketId === b.ownerId || player.isDead) continue; // don't hit the owner or dead players
+    for (const item of potentialPlayers) {
+      const player = item.player;
+      // Skip the bullet owner or dead players
+      if (player.socketId === b.ownerId || player.isDead) continue;
 
       const dx = b.x - player.x;
       const dy = b.y - player.y;
@@ -475,14 +435,14 @@ function updateBullets(game, room, games) {
       const collisionDistSq = collisionDist * collisionDist;
 
       if (distSq < collisionDistSq) {
-        // Kill the player
+        // Kill player
         player.isDead = true;
         room.alivePlayers.delete(player.socketId);
         console.log(
-          `[Server] Player ${player.userName} has been killed by bullet ${b.id}`
+          `[Server] Player ${player.userName} was killed by bullet ${b.id}`
         );
 
-        // Remove the bullet on impact and recycle it
+        // Recycle bullet
         room.bulletPool.push(b);
         room.bullets.splice(i, 1);
 
@@ -499,67 +459,44 @@ function updateBullets(game, room, games) {
         );
 
         collisionDetected = true;
-        break; // Exit the loop after collision
+        break;
       }
     }
 
     if (collisionDetected) {
-      continue; // Move to the next bullet
+      continue;
     }
   }
 
-  // Check if there's only one (or zero) players left alive => declare winner
-  const stillAlive = Array.from(room.alivePlayers).map((socketId) =>
-    room.playersMap.get(socketId)
+  // Check if only 1 or 0 players are alive => game over
+  const stillAlive = Array.from(room.alivePlayers).map((id) =>
+    room.playersMap.get(id)
   );
 
   if (stillAlive.length === 1 && !room.winner) {
-    // We have a winner
     room.winner = stillAlive[0].userName;
     console.log(`[Server] Player ${room.winner} has won roomId=${room.id}`);
-
-    // Notify all clients in the room about the winner
-    game.io
-      .to(`${game.id}-${room.id}`)
-      .emit("gameOver", { winner: room.winner });
-
-    // Trigger the endGame process to perform cleanup
+    // End the game
     endAgarIoRoom(game, room, games);
-  }
-
-  // Optionally, handle case when no players are left (all dead)
-  if (stillAlive.length === 0 && !room.winner) {
-    // No winners, game over with no winner
+  } else if (stillAlive.length === 0 && !room.winner) {
     room.winner = null;
-    console.log(`[Server] Game over in roomId=${room.id} with no winners`);
-
-    // Notify all clients in the room about the game over with no winner
-    game.io.to(`${game.id}-${room.id}`).emit("gameOver", { winner: null });
-
-    // Trigger the endGame process to perform cleanup
+    console.log(`[Server] No players left alive in roomId=${room.id}`);
+    // End the game
     endAgarIoRoom(game, room, games);
   }
 }
 
-/** Utility function: distance formula using squared distances. */
-function distanceSquared(x1, y1, x2, y2) {
-  const dx = x1 - x2;
-  const dy = y1 - y2;
-  return dx * dx + dy * dy;
-}
-
-/** Utility function: clamp a value between min & max. */
+/** Utility: clamp a value between min & max. */
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-// Export using CommonJS
 module.exports = {
   startAgarIoRoom,
   broadcastGameState,
   handlePlayerMove,
   handleShootBullet,
-  endAgarIoRoom, // Exported for use in other modules if needed
+  endAgarIoRoom,
   WORLD_WIDTH,
   WORLD_HEIGHT,
   TICK_RATE,

@@ -13,6 +13,7 @@ const {
 } = require("../utils/gameUtils");
 
 const biggestTomato = require("./games/biggestTomato");
+// Agar.io handlers
 const agarIo = require("./games/agarIo");
 
 module.exports = (io) => {
@@ -249,10 +250,6 @@ module.exports = (io) => {
     /********************************************
      * End Game Event Handler
      ********************************************/
-    /**
-     * Event to end the game manually or based on game logic.
-     * You can trigger this event based on specific conditions in your game.
-     */
     socket.on("endGame", ({ gameId, roomId }) => {
       const game = getGame(gameId, games);
       if (!game) {
@@ -278,6 +275,77 @@ module.exports = (io) => {
     });
 
     /********************************************
+     * Force Leave Game Handler
+     ********************************************/
+    socket.on("forceLeaveGame", ({ gameId, roomId }) => {
+      console.log(
+        `[Server] forceLeaveGame -> socketId=${socket.id}, gameId=${gameId}, roomId=${roomId}`
+      );
+
+      const game = getGame(gameId, games);
+      if (!game) {
+        console.log(`[Server] forceLeaveGame -> gameId=${gameId} not found`);
+        return;
+      }
+
+      // Try to find room in activeRooms or fallback to normal rooms
+      let room = game.activeRooms[roomId] || game.rooms[roomId];
+      if (!room) {
+        console.log(`[Server] forceLeaveGame -> roomId=${roomId} not found`);
+        return;
+      }
+
+      // Remove the socket from the Socket.io room
+      const uniqueRoomChannel = `${gameId}-${roomId}`;
+      socket.leave(uniqueRoomChannel);
+
+      // Remove player from the room's arrays / maps
+      room.players = room.players.filter((p) => p.socketId !== socket.id);
+      if (room.playersMap) {
+        room.playersMap.delete(socket.id);
+      }
+      if (room.alivePlayers) {
+        room.alivePlayers.delete(socket.id);
+      }
+
+      // Handle spatial index if in Agar.io game
+      if (room.playerSpatialIndex) {
+        const player = room.playersMap.get(socket.id);
+        if (player) {
+          room.playerSpatialIndex.remove(
+            {
+              minX: player.x - player.mass,
+              minY: player.y - player.mass,
+              maxX: player.x + player.mass,
+              maxY: player.y + player.mass,
+              player,
+            },
+            (a, b) => a.player.socketId === b.player.socketId
+          );
+        }
+      }
+
+      console.log(
+        `[Server] Removed socketId=${socket.id} from roomId=${roomId}`
+      );
+
+      // Check if room is empty => remove it properly
+      if (room.players.length === 0) {
+        // If it's an active room, call the Agar.io cleanup
+        if (game.activeRooms[roomId]) {
+          agarIo.endAgarIoRoom(game, room, games);
+        } else if (game.rooms[roomId]) {
+          delete game.rooms[roomId];
+          console.log(
+            `[Server] Deleted empty LOBBY roomId=${roomId} in gameId=${gameId}`
+          );
+          ensureSingleEmptyRoom(gameId, games, io);
+        }
+        broadcastRooms(gameId, games, io);
+      }
+    });
+
+    /********************************************
      * Disconnection
      ********************************************/
     socket.on("disconnect", () => {
@@ -289,7 +357,7 @@ module.exports = (io) => {
 
       // Check if user was in a LOBBY room or an ACTIVE room, remove them
       Object.entries(games).forEach(([gameId, game]) => {
-        // 1) Remove from LOBBY
+        // 1) Remove from LOBBY rooms
         Object.entries(game.rooms).forEach(([roomId, room]) => {
           const playerIndex = room.players.findIndex(
             (p) => p.socketId === socket.id
@@ -300,7 +368,7 @@ module.exports = (io) => {
               `[Server] Removed ${socket.id} from LOBBY roomId=${roomId} in gameId=${gameId}`
             );
 
-            // If empty, remove it if there's more than 1 empty room
+            // Handle empty lobby rooms
             const emptyRooms = Object.values(game.rooms).filter(
               (r) => r.players.length === 0
             );
@@ -312,27 +380,50 @@ module.exports = (io) => {
           }
         });
 
-        // 2) Remove from ACTIVE room
+        // 2) Enhanced ACTIVE room cleanup
         Object.entries(game.activeRooms).forEach(([roomId, room]) => {
           const playerIndex = room.players.findIndex(
             (p) => p.socketId === socket.id
           );
-          if (playerIndex !== -1) {
-            room.players.splice(playerIndex, 1);
-            console.log(
-              `[Server] Removed ${socket.id} from ACTIVE roomId=${roomId} in gameId=${gameId}`
+          if (playerIndex === -1) return;
+
+          const [disconnectedPlayer] = room.players.splice(playerIndex, 1);
+          console.log(
+            `[Server] Removed ${socket.id} from ACTIVE roomId=${roomId} in gameId=${gameId}`
+          );
+
+          // Agar.io Specific Cleanup
+          if (room.playersMap && room.alivePlayers && room.playerSpatialIndex) {
+            // Remove from game-specific tracking
+            room.playersMap.delete(socket.id);
+            room.alivePlayers.delete(socket.id);
+
+            // Remove from spatial index
+            room.playerSpatialIndex.remove(
+              {
+                minX: disconnectedPlayer.x - disconnectedPlayer.mass,
+                minY: disconnectedPlayer.y - disconnectedPlayer.mass,
+                maxX: disconnectedPlayer.x + disconnectedPlayer.mass,
+                maxY: disconnectedPlayer.y + disconnectedPlayer.mass,
+                player: disconnectedPlayer,
+              },
+              (a, b) => a.player.socketId === b.player.socketId
             );
 
-            // If the room is empty, delete it
-            if (room.players.length === 0) {
-              delete game.activeRooms[roomId];
-              console.log(
-                `[Server] Deleted empty ACTIVE roomId=${roomId} in gameId=${gameId}`
-              );
-
-              // Optionally, broadcast updated rooms
-              broadcastRooms(gameId, games, io);
+            // Check game end conditions
+            if (room.alivePlayers.size <= 1) {
+              const winner =
+                room.alivePlayers.size === 1
+                  ? room.playersMap.get([...room.alivePlayers][0])?.userName
+                  : null;
+              agarIo.endAgarIoRoom(game, room, games);
             }
+          }
+
+          // Cleanup empty rooms properly
+          if (room.players.length === 0 && game.activeRooms[roomId]) {
+            // Instead of just deleting, call Agar.io cleanup
+            agarIo.endAgarIoRoom(game, room, games);
           }
         });
       });
