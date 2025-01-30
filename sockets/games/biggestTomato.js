@@ -1,16 +1,15 @@
 /************************************
  * sockets/games/biggestTomato.js
  ************************************/
-
 const { shuffleDeck } = require("../../utils/cardsUtils");
 
 /**
- * Called after countdown finishes, deals 5 cards to each player, and sets up turn.
+ * Called after countdown, deals cards, sets up room.
  */
 function startBiggestTomatoRoom(game, room) {
   if (!room.players || room.players.length === 0) return;
 
-  console.log("[Server] startBiggestTomatoRoom -> Dealing cards now...");
+  console.log("[Server] startBiggestTomatoRoom -> Dealing cards...");
 
   const deck = [
     "A",
@@ -29,112 +28,92 @@ function startBiggestTomatoRoom(game, room) {
   ];
   shuffleDeck(deck);
 
+  // Deal 5 cards each
   room.players.forEach((player) => {
     player.isDead = false;
     player.cards = deck.slice(0, 5);
     deck.splice(0, 5);
   });
 
-  room.lastPlayedCard = null;
+  room.playedCards = []; // store all played cards in order
   room.currentPlayerIndex = 0;
   room.currentPlayerSocketId = room.players[0].socketId;
-  room.winner = null; // reset if needed
+  room.winner = null;
 
-  console.log(
-    "[Server] startBiggestTomatoRoom -> Assigned 5 cards to each player:"
-  );
+  console.log("[Server] Dealt 5 cards to each player:");
   room.players.forEach((p) => {
-    console.log(
-      `   => socketId=${p.socketId}, userName=${
-        p.userName
-      }, cards=[${p.cards.join(", ")}]`
-    );
+    console.log(`   => ${p.userName}, cards=[${p.cards.join(", ")}]`);
   });
 }
 
 /**
- * Handle a 'playCard' event from a player
+ * Player plays a card:
+ * - If smaller than last, the player is eliminated
+ * - Otherwise record it
  */
 function handlePlayCard(io, games, data) {
   const { gameId, roomId, socket, card } = data;
   const game = games[gameId];
   if (!game) return;
 
-  // First look in activeRooms
-  let room = game.activeRooms[roomId];
-  // If not found there, maybe it's still in the lobby (unlikely once the game starts)
+  let room = game.activeRooms[roomId] || game.rooms[roomId];
   if (!room) {
-    room = game.rooms[roomId];
-  }
-  if (!room) {
-    console.log(
-      `[Server] handlePlayCard -> Room ${roomId} not found in gameId=${gameId}`
-    );
+    console.log(`[Server] handlePlayCard -> Room ${roomId} not found`);
     return;
   }
-
-  console.log(
-    `[Server] handlePlayCard -> from socket=${socket.id}, card=${card}`
-  );
 
   // Enforce turn-based logic
   if (socket.id !== room.currentPlayerSocketId) {
-    console.log(`[Server] handlePlayCard -> It's not your turn, ignoring.`);
+    console.log("[Server] Not your turn, ignoring playCard.");
     return;
   }
 
+  // Find player
   const player = room.players.find((p) => p.socketId === socket.id);
   if (!player || player.isDead) {
-    console.log(
-      `[Server] handlePlayCard -> Player not found or is dead, ignoring.`
-    );
+    console.log("[Server] Player not found or dead, ignoring.");
     return;
   }
 
-  console.log(`[Server] handlePlayCard: ${player.userName} played ${card}`);
+  console.log(`[Server] ${player.userName} played ${card}`);
 
-  // Compare vs lastPlayedCard if any
-  if (room.lastPlayedCard) {
-    const isCardBigger = compareCards(card, room.lastPlayedCard);
-    if (!isCardBigger) {
+  // Compare with last card if any
+  if (room.playedCards.length > 0) {
+    const lastCard = room.playedCards[room.playedCards.length - 1];
+    if (!compareCards(card, lastCard)) {
       player.isDead = true;
       console.log(
-        `[Server] => smaller card => ${player.userName} is eliminated`
+        `[Server] => smaller card => ${player.userName} is eliminated.`
       );
-    } else {
-      room.lastPlayedCard = card;
-      console.log(`[Server] => updated lastPlayedCard to ${card}`);
     }
-  } else {
-    // first card in the round
-    room.lastPlayedCard = card;
-    console.log(`[Server] => first card of the round: ${card}`);
   }
 
-  // remove played card from player's hand
+  // Record the new card
+  room.playedCards.push(card);
+
+  // Remove the card from player's hand
   player.cards = player.cards.filter((c) => c !== card);
 
-  // move turn to the next alive player
+  // Next alive player
   nextAlivePlayer(room);
 
-  // check if game is over (1 or 0 alive players remain)
-  const alivePlayers = room.players.filter((p) => !p.isDead);
-  if (alivePlayers.length <= 1) {
-    room.winner = alivePlayers.length === 1 ? alivePlayers[0].socketId : null;
+  // Check if 1 or 0 alive => game over
+  const alive = room.players.filter((p) => !p.isDead);
+  if (alive.length <= 1) {
+    room.winner = alive.length === 1 ? alive[0].socketId : null;
     console.log(`[Server] => Game Over! winner=${room.winner || "None"}`);
 
-    io.to(`${gameId}-${roomId}`).emit("gameOver", {
-      winner: room.winner,
-    });
+    io.to(`${gameId}-${roomId}`).emit("gameOver", { winner: room.winner });
+    endBiggestTomatoRoom(game, room, games);
     return;
   }
 
-  // otherwise broadcast updated state
+  // Otherwise broadcast updated state
   broadcastGameState(io, gameId, roomId, room);
 }
 
 /**
- * Compare two card strings (e.g. 'A' vs '9' vs 'K')
+ * Compare two cards by rank. Return true if cardA > cardB.
  */
 function compareCards(cardA, cardB) {
   const rankOrder = [
@@ -152,14 +131,11 @@ function compareCards(cardA, cardB) {
     "Q",
     "K",
   ];
-  const idxA = rankOrder.indexOf(cardA);
-  const idxB = rankOrder.indexOf(cardB);
-  // A bigger index => bigger card
-  return idxA > idxB;
+  return rankOrder.indexOf(cardA) > rankOrder.indexOf(cardB);
 }
 
 /**
- * Move room.currentPlayerIndex forward to next non-dead player
+ * Move turn forward to next non-dead player
  */
 function nextAlivePlayer(room) {
   let nextIndex = (room.currentPlayerIndex + 1) % room.players.length;
@@ -168,9 +144,7 @@ function nextAlivePlayer(room) {
     if (!candidate.isDead) {
       room.currentPlayerIndex = nextIndex;
       room.currentPlayerSocketId = candidate.socketId;
-      console.log(
-        `[Server] => nextAlivePlayer -> new turn: socketId=${candidate.socketId}`
-      );
+      console.log(`[Server] => next turn: ${candidate.userName}`);
       return;
     }
     nextIndex = (nextIndex + 1) % room.players.length;
@@ -178,11 +152,28 @@ function nextAlivePlayer(room) {
 }
 
 /**
- * Broadcast the entire room state
+ * Broadcast to all clients in this room.
+ *
+ * NOTE: We only show the "second-to-last" card as `lastPlayedCard`,
+ * and the entire older list as `playedCardHistory`.
+ * The truly last card is hidden from the front-end.
  */
 function broadcastGameState(io, gameId, roomId, room) {
   const channel = `${gameId}-${roomId}`;
-  console.log(`[Server] broadcastGameState -> sending to room ${channel}`);
+
+  const played = room.playedCards;
+  let displayedLastCard = null; // This is the "previous to last"
+  let displayedHistory = []; // Everything older
+
+  if (played.length >= 2) {
+    // If we have at least 2 cards, the "last played" we display
+    // is the second-to-last element
+    displayedLastCard = played[played.length - 2];
+  }
+  if (played.length > 2) {
+    // Everything up to (but not including) the second-to-last
+    displayedHistory = played.slice(0, played.length - 2);
+  }
 
   io.to(channel).emit("gameStateUpdate", {
     roomId,
@@ -192,14 +183,26 @@ function broadcastGameState(io, gameId, roomId, room) {
       isDead: p.isDead,
       cards: p.cards || [],
     })),
-    lastPlayedCard: room.lastPlayedCard || null,
+    lastPlayedCard: displayedLastCard, // The second-to-last card
+    playedCardHistory: displayedHistory, // All older
     currentPlayerId: room.currentPlayerSocketId,
     winner: room.winner || null,
   });
+}
+
+/**
+ * Cleanup
+ */
+function endBiggestTomatoRoom(game, room, games) {
+  console.log(`[Server] endBiggestTomatoRoom -> cleaning up room ${room.id}`);
+  if (game.activeRooms[room.id]) {
+    delete game.activeRooms[room.id];
+  }
 }
 
 module.exports = {
   startBiggestTomatoRoom,
   handlePlayCard,
   broadcastGameState,
+  endBiggestTomatoRoom,
 };

@@ -1,7 +1,6 @@
 /************************************
  * sockets/index.js
  ************************************/
-
 const {
   getGame,
   ensureSingleEmptyRoom,
@@ -12,9 +11,14 @@ const {
   updateRoomCountForEveryone,
 } = require("../utils/gameUtils");
 
+const {
+  broadcastGameState: broadcastGameGeneric,
+  endGame: endGameGeneric,
+} = require("../utils/gameRegistry");
+
+// For direct event handling if you prefer (like .handlePlayCard)
 const biggestTomato = require("./games/biggestTomato");
-// Agar.io handlers
-const agarIo = require("./games/agarIo");
+const agarIo = require("./games/agarIo.js");
 
 module.exports = (io) => {
   // Master games object:
@@ -226,10 +230,12 @@ module.exports = (io) => {
       console.log(
         `[Server] requestGameState -> broadcasting current state for ${gameId}-${roomId}`
       );
-      agarIo.broadcastGameState(io, gameId, roomId, room);
+
+      // Use our generic function from gameRegistry
+      broadcastGameGeneric(gameId, io, room);
     });
 
-    // 3) For BiggestTomato (unrelated) - just an example
+    // 3) For BiggestTomato
     socket.on("playCard", (data) => {
       data.socket = socket; // So we know who played
       biggestTomato.handlePlayCard(io, games, data);
@@ -248,7 +254,7 @@ module.exports = (io) => {
     });
 
     /********************************************
-     * End Game Event Handler
+     * End Game Event Handler (generic)
      ********************************************/
     socket.on("endGame", ({ gameId, roomId }) => {
       const game = getGame(gameId, games);
@@ -266,8 +272,8 @@ module.exports = (io) => {
         return;
       }
 
-      // Call the cleanup function
-      agarIo.endAgarIoRoom(game, room, games);
+      // Use our generic function from gameRegistry
+      endGameGeneric(gameId, game, room, games);
 
       console.log(
         `[Server] endGame -> Cleaned up roomId=${roomId} in gameId=${gameId}`
@@ -299,8 +305,10 @@ module.exports = (io) => {
       const uniqueRoomChannel = `${gameId}-${roomId}`;
       socket.leave(uniqueRoomChannel);
 
-      // Remove player from the room's arrays / maps
+      // Remove player from the array
       room.players = room.players.filter((p) => p.socketId !== socket.id);
+
+      // If Agar.io, also remove from playersMap & so on
       if (room.playersMap) {
         room.playersMap.delete(socket.id);
       }
@@ -308,7 +316,7 @@ module.exports = (io) => {
         room.alivePlayers.delete(socket.id);
       }
 
-      // Handle spatial index if in Agar.io game
+      // If Agar.io, remove from spatial index
       if (room.playerSpatialIndex) {
         const player = room.playersMap.get(socket.id);
         if (player) {
@@ -329,11 +337,11 @@ module.exports = (io) => {
         `[Server] Removed socketId=${socket.id} from roomId=${roomId}`
       );
 
-      // Check if room is empty => remove it properly
+      // Check if room is empty => remove or end the game
       if (room.players.length === 0) {
-        // If it's an active room, call the Agar.io cleanup
+        // If it's an active room, call endGame generic
         if (game.activeRooms[roomId]) {
-          agarIo.endAgarIoRoom(game, room, games);
+          endGameGeneric(gameId, game, room, games);
         } else if (game.rooms[roomId]) {
           delete game.rooms[roomId];
           console.log(
@@ -355,9 +363,8 @@ module.exports = (io) => {
       delete userList[socket.id];
       io.emit("users", Object.values(userList));
 
-      // Check if user was in a LOBBY room or an ACTIVE room, remove them
+      // 1) Remove from LOBBY rooms
       Object.entries(games).forEach(([gameId, game]) => {
-        // 1) Remove from LOBBY rooms
         Object.entries(game.rooms).forEach(([roomId, room]) => {
           const playerIndex = room.players.findIndex(
             (p) => p.socketId === socket.id
@@ -380,7 +387,7 @@ module.exports = (io) => {
           }
         });
 
-        // 2) Enhanced ACTIVE room cleanup
+        // 2) Remove from ACTIVE rooms
         Object.entries(game.activeRooms).forEach(([roomId, room]) => {
           const playerIndex = room.players.findIndex(
             (p) => p.socketId === socket.id
@@ -392,13 +399,11 @@ module.exports = (io) => {
             `[Server] Removed ${socket.id} from ACTIVE roomId=${roomId} in gameId=${gameId}`
           );
 
-          // Agar.io Specific Cleanup
+          // If Agar.io, handle playersMap, alivePlayers, etc.
           if (room.playersMap && room.alivePlayers && room.playerSpatialIndex) {
-            // Remove from game-specific tracking
             room.playersMap.delete(socket.id);
             room.alivePlayers.delete(socket.id);
 
-            // Remove from spatial index
             room.playerSpatialIndex.remove(
               {
                 minX: disconnectedPlayer.x - disconnectedPlayer.mass,
@@ -410,20 +415,16 @@ module.exports = (io) => {
               (a, b) => a.player.socketId === b.player.socketId
             );
 
-            // Check game end conditions
+            // If only 1 or 0 remain
             if (room.alivePlayers.size <= 1) {
-              const winner =
-                room.alivePlayers.size === 1
-                  ? room.playersMap.get([...room.alivePlayers][0])?.userName
-                  : null;
-              agarIo.endAgarIoRoom(game, room, games);
+              // We can just end the game
+              endGameGeneric(gameId, game, room, games);
             }
           }
 
-          // Cleanup empty rooms properly
+          // If the room is empty, end the game / remove it
           if (room.players.length === 0 && game.activeRooms[roomId]) {
-            // Instead of just deleting, call Agar.io cleanup
-            agarIo.endAgarIoRoom(game, room, games);
+            endGameGeneric(gameId, game, room, games);
           }
         });
       });

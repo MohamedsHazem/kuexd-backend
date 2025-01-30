@@ -1,4 +1,6 @@
-// socket-app/utils/cardsUtils.js
+/************************************
+ * utils/cardsUtils.js
+ ************************************/
 
 function shuffleDeck(deck) {
   for (let i = deck.length - 1; i > 0; i--) {
