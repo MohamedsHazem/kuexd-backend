@@ -7,7 +7,7 @@ const WORLD_WIDTH = 1080;
 const WORLD_HEIGHT = 1080;
 
 /** Server update rate in milliseconds */
-const TICK_RATE = 30; // ~60 FPS updates
+const TICK_RATE = 45; // ~60 FPS updates
 
 // We'll dynamically load RBush:
 let RBush;
