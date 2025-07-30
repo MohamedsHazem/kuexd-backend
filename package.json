@@ -1,7 +1,7 @@
 {
-  "name": "socket-app",
+  "name": "kuexd-backend",
   "version": "1.0.0",
-  "description": "Backend for Socket-App",
+  "description": "Backend for KueXD Game Platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
